@@ -9,6 +9,8 @@ pub use url::Url;
 pub mod mgf;
 pub mod mzml;
 pub mod tdf;
+pub mod thermo;
+pub mod mzdb;
 pub mod util;
 pub use util::FileFormat;
 
@@ -167,6 +169,10 @@ pub enum Error {
     TDF(#[from] timsrust::TimsRustError),
     #[error("MGF error: {0}")]
     MGF(#[from] mgf::MgfError),
+    #[error("Thermo error: {0}")]
+    Thermo(#[from] thermo::ThermoError),
+    #[error("mzDB error: {0}")]
+    MzDb(#[from] mzdb::MzDbError),
 }
 
 #[cfg(test)]

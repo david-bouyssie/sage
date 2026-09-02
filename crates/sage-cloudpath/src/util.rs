@@ -9,6 +9,8 @@ pub enum FileFormat {
     MzML,
     MGF,
     TDF,
+    ThermoRaw,
+    MzDb,
     Unidentified,
 }
 
@@ -23,6 +25,8 @@ impl FileFormat {
             FileFormat::MzML => false,
             FileFormat::MGF => false,
             FileFormat::TDF => true,
+            FileFormat::ThermoRaw => false,
+            FileFormat::MzDb => false,
             FileFormat::Unidentified => false,
         }
     }
@@ -31,29 +35,32 @@ impl FileFormat {
 impl From<&str> for FileFormat {
     fn from(s: &str) -> Self {
         let path_lower = s.to_lowercase();
+
         if path_lower.ends_with(".mgf.gz") || path_lower.ends_with(".mgf") {
             FileFormat::MGF
         } else if is_bruker(&path_lower) {
             FileFormat::TDF
+        } else if path_lower.ends_with(".mzdb") {
+            FileFormat::MzDb
         } else if path_lower.ends_with(".mzml.gz") || path_lower.ends_with(".mzml") {
             FileFormat::MzML
+        } else if path_lower.ends_with(".raw") {
+            FileFormat::ThermoRaw
         } else {
             FileFormat::Unidentified
         }
     }
 }
 
-const BRUKER_EXTENSIONS: [&str; 5] = [".d", ".tdf", ".tdf_bin", "ms2", "raw"];
-
+const BRUKER_EXTENSIONS: [&str; 4] = [".d", ".tdf", ".tdf_bin", "ms2"];
+ 
 fn is_bruker(path: &str) -> bool {
     BRUKER_EXTENSIONS.iter().any(|ext| {
-        if path.ends_with(std::path::MAIN_SEPARATOR) {
-            path.strip_suffix(std::path::MAIN_SEPARATOR)
-                .unwrap()
-                .ends_with(ext)
-        } else {
-            path.ends_with(ext)
-        }
+        let trimmed = path
+            .strip_suffix('/')
+            .or_else(|| path.strip_suffix(std::path::MAIN_SEPARATOR))
+            .unwrap_or(path);
+        trimmed.ends_with(ext)
     })
 }
 
@@ -68,8 +75,36 @@ pub fn read_spectra(
         FileFormat::MzML => read_mzml(url, file_id, sn),
         FileFormat::MGF => read_mgf(url, file_id),
         FileFormat::TDF => read_tdf(url, file_id, bruker_processor, requires_ms1),
+        FileFormat::ThermoRaw => read_thermo(url, file_id),
+        FileFormat::MzDb => read_mzdb(url, file_id, requires_ms1),
         FileFormat::Unidentified => panic!("Unable to get type for '{}'", url), // read_mzml(path, file_id, sn),
     }
+}
+
+/// Read a Thermo `.raw` file directly, without an mzML conversion step.
+///
+/// Local paths only: the reader seeks within the file rather than consuming a stream, so there is no `object_store` path.
+/// Mirrors `read_tdf`'s own local-file convention.
+pub fn read_thermo(url: &Url, file_id: usize) -> Result<Vec<RawSpectrum>, Error> {
+    if url.scheme() != "file" {
+        log::error!("Thermo RAW files must be local: {}", url);
+        return Err(Error::InvalidUri);
+    }
+    let path = url.to_file_path().map_err(|_| Error::InvalidUri)?;
+    crate::thermo::read_thermo_raw(&path, file_id).map_err(Error::Thermo)
+}
+
+/// Read an mzDB file directly.
+///
+/// Local paths only: the reader seeks within the file rather than consuming a stream, so there is no `object_store` path.
+/// Mirrors `read_tdf`'s own local-file convention.
+pub fn read_mzdb(url: &Url, file_id: usize, requires_ms1: bool) -> Result<Vec<RawSpectrum>, Error> {
+    if url.scheme() != "file" {
+        log::error!("mzDB files must be local: {}", url);
+        return Err(Error::InvalidUri);
+    }
+    let path = url.to_file_path().map_err(|_| Error::InvalidUri)?;
+    crate::mzdb::read_mzdb(&path, file_id, requires_ms1).map_err(Error::MzDb)
 }
 
 pub fn read_mzml(
@@ -169,7 +204,7 @@ where
 }
 
 #[cfg(test)]
-mod test {
+mod format_tests {
     use super::*;
 
     #[test]
@@ -181,5 +216,39 @@ mod test {
         assert_eq!(FileFormat::from("foo.tdf"), FileFormat::TDF);
         assert_eq!(FileFormat::from("./tomato/foo.d"), FileFormat::TDF);
         assert_eq!(FileFormat::from("./tomato/foo.d/"), FileFormat::TDF);
+    }
+
+    /// `.raw` is Thermo, with no filesystem lookup involved
+    #[test]
+    fn raw_is_thermo() {
+        assert_eq!(FileFormat::from("/data/sample.raw"), FileFormat::ThermoRaw);
+        assert_eq!(FileFormat::from("/data/sample.RAW"), FileFormat::ThermoRaw);
+        assert_eq!(FileFormat::from("/nope/missing.raw"), FileFormat::ThermoRaw);
+        assert_eq!(
+            FileFormat::from("file:///data/sample.raw"),
+            FileFormat::ThermoRaw
+        );
+    }
+ 
+    /// mzDB, likewise by suffix alone, and likewise via a `file://` URL.
+    #[test]
+    fn mzdb_is_detected() {
+        assert_eq!(FileFormat::from("/data/sample.mzDB"), FileFormat::MzDb);
+        assert_eq!(
+            FileFormat::from("file:///data/sample.mzdb"),
+            FileFormat::MzDb
+        );
+    }
+ 
+    /// The formats that already worked must keep working.
+    #[test]
+    fn existing_formats_unchanged() {
+        assert_eq!(FileFormat::from("a.mzML"), FileFormat::MzML);
+        assert_eq!(FileFormat::from("a.mzml.gz"), FileFormat::MzML);
+        assert_eq!(FileFormat::from("a.mgf"), FileFormat::MGF);
+        assert_eq!(FileFormat::from("a.mgf.gz"), FileFormat::MGF);
+        assert_eq!(FileFormat::from("a.d"), FileFormat::TDF);
+        assert_eq!(FileFormat::from("a.tdf"), FileFormat::TDF);
+        assert_eq!(FileFormat::from("a.txt"), FileFormat::Unidentified);
     }
 }
